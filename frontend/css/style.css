@@ -841,6 +841,9 @@ body[data-detail=expert] .bottom-dock { grid-template-columns: 1fr 1fr; }
 .language-note > details > summary { display: inline; cursor: pointer; text-decoration: underline; }
 .language-note p { line-height: 1.8; }
 [hidden] { display: none !important; }
+.playback-toggle { min-width:83px; justify-content:center; }
+.playback-toggle .button-word { display:inline; }
+.video-download { min-width:190px; justify-content:center; white-space:nowrap; }
 
 /* Let learners inspect one part of an instruction before its outcome is revealed. */
 .study-controls { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-bottom:24px; }

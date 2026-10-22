@@ -12,6 +12,7 @@ function element(selector) {
       remove(name) { element(selector).classes.delete(name); },
     },
     addEventListener(name, handler) { this.listeners[name] = handler; },
+    setAttribute(name, value) { this[name] = value; },
     setSelectionRange(start) { this.selectionStart = start; },
     focus() { this.focused = true; },
     click() { this.clicked = true; },

@@ -9,6 +9,23 @@ Use **Value columns** to compare numbers, **Named boxes** to inspect memory, and
 **Execution path** to follow repeated lines. The slider moves between teaching
 instructions, rather than raw debugger events. Playback allows time to read.
 
+The **Play / Pause** control toggles in place. After running code,
+**Download visualization** generates a silent, seekable `.webm` video of the
+entire captured execution locally in the browser. It encodes timestamped visual
+states directly, without screen capture permissions or waiting for playback.
+The current tempo sets the video's reading time, not the export's processing
+time. Click the same button during generation to cancel.
+
+Videos use a 1280 × 900 presentation layout with highlighted source, explanations,
+recorded values, and graph/tree/matrix/column figures. Walkthrough mode includes
+the input, work and result stages; other learning approaches export the results.
+The export requires a browser with VP8 WebCodecs encoding, such as supported
+Chrome/Edge installations. There are no export network requests or backend
+changes. Processing time depends on the run and device; exports are limited to
+256 MB. Run `node tests/video-export.browser.cjs` with Playwright available to
+verify real downloads, decoding, timing, seeking, cancellation and supported
+visualizations in installed Chrome (`PLAYWRIGHT_CHANNEL=msedge` selects Edge).
+
 **Walk me through** breaks each instruction into reading inputs, doing the work,
 and revealing its captured result. The work view includes an expression tree
 and expanded small powers. **Let me predict** asks for a value, branch choice or

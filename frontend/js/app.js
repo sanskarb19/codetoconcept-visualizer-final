@@ -11,7 +11,7 @@
     previous: $("#previous-button"),
     next: $("#next-button"),
     play: $("#play-button"),
-    pause: $("#pause-button"),
+    downloadVisualization: $("#download-visualization-button"),
     reset: $("#reset-button"),
     explain: $("#explain-button"),
     speed: $("#speed-range"),
@@ -73,6 +73,7 @@
     visualMode: "picture",
     proofCell: [0, 0],
     structurePinned: false,
+    videoExport: null,
   };
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -727,8 +728,8 @@
     el.counter.innerHTML = `<strong>${count}</strong> / ${total}`;
     el.previous.disabled = state.busy || state.lessonIndex <= 0;
     el.next.disabled = state.busy || state.lessonIndex < 0 || state.lessonIndex >= total - 1;
-    el.play.disabled = state.busy || !total || state.playing;
-    el.pause.disabled = !state.playing;
+    renderPlaybackButton();
+    renderVideoButton();
     el.reset.disabled = state.busy || !total;
     el.explain.disabled = state.busy || !event || state.explaining;
     state.currentLine = state.teachingSteps[state.lessonIndex]?.line ?? event?.line_number ?? null;
@@ -754,8 +755,64 @@
     state.playing = false;
     window.clearTimeout(state.playTimer);
     state.playTimer = null;
-    el.play.disabled = state.busy || !state.events.length;
-    el.pause.disabled = true;
+    renderPlaybackButton();
+  }
+
+  function renderPlaybackButton() {
+    const playing = state.playing;
+    const label = playing ? "Pause visualization" : "Play visualization";
+    el.play.disabled = state.busy || !state.teachingSteps.length;
+    el.play.title = label;
+    el.play.setAttribute("aria-label", label);
+    el.play.setAttribute("aria-pressed", String(playing));
+    el.play.innerHTML = `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">${playing ? '<path d="M5.2 3.6v8.8M10.8 3.6v8.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' : '<path d="m5.2 3.5 7.1 4.1-7.1 4.1V3.5Z" fill="currentColor"/>'}</svg><span class="button-word">${playing ? "Pause" : "Play"}</span>`;
+  }
+
+  function renderVideoButton() {
+    const exporting = state.videoExport;
+    el.downloadVisualization.hidden = !exporting && !state.teachingSteps.length;
+    el.downloadVisualization.disabled = !exporting && (state.busy || !state.teachingSteps.length);
+    el.downloadVisualization.textContent = exporting ? `Cancel export · ${exporting.progress}%` : "Download visualization";
+    el.downloadVisualization.title = exporting ? "Cancel video generation" : "Generate a WebM video from the captured instructions";
+  }
+
+  async function downloadVisualization() {
+    if (state.videoExport) { state.videoExport.controller.abort(); return; }
+    if (state.busy || !state.teachingSteps.length) return;
+    stopPlayback();
+    const job = {controller:new AbortController(), progress:0};
+    state.videoExport = job;
+    renderVideoButton();
+    const snapshot = {
+      steps: state.teachingSteps.slice(),
+      source: state.execution.source_code,
+      concept: state.concept,
+      language: state.language,
+      mode: state.visualMode,
+      guided: state.study?.mode === "guided",
+      directed: $("#directed-toggle").checked,
+      variable: $("#structure-variable").value,
+      holdMs: 4200 - Number(el.speed.value) * 330,
+    };
+    const stem = (el.filename.textContent || "visualization").replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]/gi, "_");
+    try {
+      const blob = await window.VisualizationVideo.exportVideo(snapshot, {
+        signal:job.controller.signal,
+        onProgress:progress => { job.progress = progress; renderVideoButton(); },
+      });
+      if (job.controller.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url; link.download = `${stem}-visualization.webm`;
+      document.body.appendChild(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      showToast("Visualization video downloaded (.webm).", "success");
+    } catch (error) {
+      showToast(job.controller.signal.aborted ? "Video export cancelled." : `Could not export video: ${error.message}`, job.controller.signal.aborted ? "info" : "error");
+    } finally {
+      state.videoExport = null;
+      renderVideoButton();
+    }
   }
 
   function selectStep(index) {
@@ -1058,18 +1115,18 @@
     });
     el.run.addEventListener("click", runCode);
     el.downloadButton.addEventListener("click", downloadCode);
+    el.downloadVisualization.addEventListener("click", downloadVisualization);
     el.previous.addEventListener("click", () => { stopPlayback(); selectLesson(state.lessonIndex - 1); });
     el.next.addEventListener("click", () => { stopPlayback(); if (window.GuidedLesson?.advance(state)) renderStep(); else selectLesson(state.lessonIndex + 1); });
     el.play.addEventListener("click", () => {
+      if (state.playing) { stopPlayback(); return; }
       if (!state.events.length) return;
       if (state.study?.mode === "predict") { showToast("Prediction mode pauses for your answer. Use Check my prediction or Reveal the result.", "info"); return; }
       if (state.lessonIndex >= state.teachingSteps.length - 1 && (state.study?.mode === "all" || state.study?.phase === 2)) selectLesson(0);
       state.playing = true;
-      el.play.disabled = true;
-      el.pause.disabled = false;
+      renderPlaybackButton();
       state.playTimer = window.setTimeout(playbackTick, 100);
     });
-    el.pause.addEventListener("click", stopPlayback);
     el.reset.addEventListener("click", () => {
       stopPlayback();
       if (state.study) Object.assign(state.study, {phase:0, revealed:false, answer:"", feedback:null, node:null});
