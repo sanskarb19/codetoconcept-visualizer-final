@@ -14,9 +14,13 @@ USER_FILENAME = "<user_code>"
 
 
 def _snapshot_locals(frame):
+    return _snapshot_namespace(frame.f_locals)
+
+
+def _snapshot_namespace(namespace):
     out = {}
-    for name, value in frame.f_locals.items():
-        if name.startswith("__") and name.endswith("__"):
+    for name, value in namespace.items():
+        if name.startswith("__"):
             continue
         if isinstance(value, types.ModuleType):
             continue
@@ -37,7 +41,7 @@ def main():
         source = f.read()
 
     events = []
-    state = {"step": 0, "calls": []}
+    state = {"step": 0, "calls": [], "frames": {}, "next_frame": 0}
     real_stdout = sys.stdout
     real_stderr = sys.stderr
     captured = io.StringIO()
@@ -51,7 +55,12 @@ def main():
             "line_number": frame.f_lineno,
             "function": frame.f_code.co_name,
             "call_depth": len(state["calls"]),
+            "frame_id": state["frames"].get(id(frame)),
+            "stack": [{"function": f.f_code.co_name, "line": f.f_lineno,
+                       "frame_id": state["frames"].get(id(f))}
+                      for f in state["calls"]],
             "locals": _snapshot_locals(frame),
+            "globals": _snapshot_namespace(frame.f_globals) if frame.f_code.co_name != "<module>" else {},
             "stdout": captured.getvalue(),
         }
         if extra:
@@ -72,7 +81,9 @@ def main():
             state["step"] += 1
 
         elif event_type == "call":
-            state["calls"].append(frame.f_code.co_name)
+            state["next_frame"] += 1
+            state["frames"][id(frame)] = state["next_frame"]
+            state["calls"].append(frame)
             events.append(make_event(frame, "call"))
             state["step"] += 1
 
@@ -107,8 +118,14 @@ def main():
 
     sys.settrace(global_tracer)
     try:
-        code = compile(source, USER_FILENAME, "exec")
+        language = sys.argv[3] if len(sys.argv) > 3 else "python"
+        executable_source = source
         g = {"__name__": "__main__", "__file__": USER_FILENAME}
+        if language == "matlab":
+            from execution.matlab import translate, environment
+            executable_source = translate(source)
+            g.update(environment())
+        code = compile(executable_source, USER_FILENAME, "exec")
         exec(code, g)
     except SystemExit:
         pass
@@ -139,6 +156,7 @@ def main():
         "stdout": captured.getvalue(),
         "stderr": "",
         "timed_out": False,
+        "language": sys.argv[3] if len(sys.argv) > 3 else "python",
     }
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f)

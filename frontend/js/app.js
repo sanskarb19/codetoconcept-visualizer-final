@@ -37,6 +37,11 @@
     highlight: $("#fallback-highlight"),
     editorPosition: $("#editor-position"),
     editorEngine: $("#editor-engine"),
+    editorPanel: $(".editor-panel"),
+    importButton: $("#import-button"),
+    downloadButton: $("#download-button"),
+    importFile: $("#import-file"),
+    filename: $("#editor-filename"),
   };
 
   const state = {
@@ -48,6 +53,8 @@
     playing: false,
     playTimer: null,
     busy: false,
+    importing: false,
+    imported: false,
     explaining: false,
     explanationText: "",
     explanationError: "",
@@ -60,6 +67,12 @@
     editorReady: false,
     editorDecorations: [],
     source: "",
+    language: "python",
+    teachingSteps: [],
+    lessonIndex: -1,
+    visualMode: "picture",
+    proofCell: [0, 0],
+    structurePinned: false,
   };
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -110,6 +123,143 @@
       el.textarea.value = value;
       syncFallback();
     }
+  }
+
+  async function importCodeFile(files) {
+    if (state.busy || state.importing) {
+      showToast("Wait for the current operation to finish before importing.");
+      return;
+    }
+    if (files.length !== 1) {
+      showToast("Choose one Python or text file at a time.");
+      return;
+    }
+    const file = files[0];
+    if (!/\.(py|pyw|m|txt)$/i.test(file.name)) {
+      showToast("Choose a Python (.py, .pyw), MATLAB (.m) or text (.txt) file.");
+      return;
+    }
+    if (file.size > 400_000) {
+      showToast("This file is too large. Code must fit within 100,000 characters.");
+      return;
+    }
+    state.importing = true;
+    el.importButton.disabled = true;
+    el.downloadButton.disabled = true;
+    el.run.disabled = true;
+    try {
+      const buffer = await file.arrayBuffer();
+      const code = new TextDecoder("utf-8", { fatal: true }).decode(buffer).replace(/\r\n?/g, "\n");
+      if (code.includes("\0")) throw new Error("Choose a text file, not a binary file.");
+      if (Array.from(code).length > 100_000) throw new Error("Code must fit within 100,000 characters.");
+      // Prevent a pending startup example from replacing the imported source.
+      state.imported = true;
+      state.conceptRequest += 1;
+      if (/\.m$/i.test(file.name)) {
+        state.language = "matlab";
+        $("#language-select").value = "matlab";
+        $("#language-note").hidden = false;
+        $("#editor-mode").textContent = "MATLAB learning mode";
+        if (state.editorReady) window.monaco?.editor?.setModelLanguage(state.editor.getModel(), "plaintext");
+      } else if (/\.pyw?$/i.test(file.name)) {
+        state.language = "python";
+        $("#language-select").value = "python";
+        $("#language-note").hidden = true;
+        $("#editor-mode").textContent = "Python";
+        if (state.editorReady) window.monaco?.editor?.setModelLanguage(state.editor.getModel(), "python");
+      }
+      clearExecution();
+      setCode(code);
+      el.filename.textContent = file.name;
+      el.filename.title = file.name;
+      if (state.editorReady) {
+        state.editor.setPosition({ lineNumber: 1, column: 1 });
+        state.editor.revealLine(1);
+        state.editor.focus();
+      } else {
+        el.textarea.setSelectionRange(0, 0);
+        el.textarea.scrollTop = 0;
+        el.textarea.scrollLeft = 0;
+        syncFallback();
+        el.textarea.focus();
+      }
+      showToast(`Imported ${file.name}. Ready to edit and run.`, "success");
+    } catch (error) {
+      showToast(`Could not import file: ${error instanceof TypeError ? "Use a UTF-8 text file." : error.message}`);
+    } finally {
+      state.importing = false;
+      el.importButton.disabled = false;
+      el.downloadButton.disabled = false;
+      el.run.disabled = state.busy;
+    }
+  }
+
+  function bindFileImport() {
+    el.importButton.addEventListener("click", () => el.importFile.click());
+    el.importFile.addEventListener("change", () => {
+      const files = Array.from(el.importFile.files);
+      el.importFile.value = "";
+      if (files.length) importCodeFile(files);
+    });
+    let dragDepth = 0;
+    const isFileDrag = (event) => Array.from(event.dataTransfer?.types || []).includes("Files");
+    el.editorPanel.addEventListener("dragenter", (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      dragDepth += 1;
+      el.editorPanel.classList.add("drag-over");
+    }, true);
+    el.editorPanel.addEventListener("dragover", (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = state.busy || state.importing ? "none" : "copy";
+    }, true);
+    el.editorPanel.addEventListener("dragleave", (event) => {
+      if (!isFileDrag(event)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) el.editorPanel.classList.remove("drag-over");
+    }, true);
+    el.editorPanel.addEventListener("drop", (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dragDepth = 0;
+      el.editorPanel.classList.remove("drag-over");
+      importCodeFile(Array.from(event.dataTransfer.files));
+    }, true);
+    // Dropping elsewhere must not navigate away from unsaved editor content.
+    for (const type of ["dragover", "drop"]) {
+      window.addEventListener(type, (event) => {
+        if (isFileDrag(event)) event.preventDefault();
+        if (type === "drop") {
+          dragDepth = 0;
+          el.editorPanel.classList.remove("drag-over");
+        }
+      });
+    }
+  }
+
+  function downloadCode() {
+    if (state.importing) return;
+    const code = getCode();
+    if (!code.trim()) {
+      showToast("Write or import some code before downloading.");
+      return;
+    }
+    const stem = (el.filename.textContent || "main.py")
+      .replace(/\.(py|pyw|m|txt)$/i, "")
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
+    const filename = `${stem || "main"}.${state.language === "matlab" ? "m" : "py"}`;
+    const url = URL.createObjectURL(new Blob([code], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast(`Download started: ${filename}`, "success");
   }
 
   function matchingBrackets(source, caret) {
@@ -192,7 +342,7 @@
   }
 
   function installFallbackEditing() {
-    el.textarea.addEventListener("input", syncFallback);
+    el.textarea.addEventListener("input", () => { syncFallback(); if (state.execution) clearExecution(); });
     el.textarea.addEventListener("scroll", syncFallback, { passive: true });
     el.textarea.addEventListener("click", updateCursorPosition);
     el.textarea.addEventListener("keyup", updateCursorPosition);
@@ -258,8 +408,8 @@
             theme: "pcv-dark",
             automaticLayout: true,
             fontFamily: '"DM Mono", monospace',
-            fontSize: 12,
-            lineHeight: 21,
+            fontSize: 14,
+            lineHeight: 24,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
             renderLineHighlight: "all",
@@ -302,7 +452,7 @@
           });
           window.monaco.editor.setTheme("pcv-dark");
           state.editorReady = true;
-          state.editor.onDidChangeModelContent(() => { state.source = state.editor.getValue(); });
+          state.editor.onDidChangeModelContent(() => { state.source = state.editor.getValue(); if (state.execution) clearExecution(); });
           state.editor.onDidChangeCursorPosition((event) => {
             el.editorPosition.textContent = `Ln ${event.position.lineNumber}, Col ${event.position.column}`;
           });
@@ -354,6 +504,8 @@
       if (type === "none") return "None";
       if (type === "bool") return inner ? "True" : "False";
       if (type === "str") return JSON.stringify(inner);
+      if (type === "matrix") return `[${inner.map(row => row.join(", ")).join("; ")}]`;
+      if (type === "instance") return `${value.class || "Node"} {${Object.entries(inner || {}).slice(0, 5).map(([key, item]) => `${key}: ${item?.__type__ === "instance" ? item.class : safeText(item)}`).join(", ")}}`;
       if (type === "dict" && inner && typeof inner === "object") {
         return `{${Object.entries(inner).map(([key, item]) => `${key}: ${safeText(item)}`).join(", ")}}`;
       }
@@ -379,7 +531,10 @@
       el.traceList.innerHTML = `<div class="trace-empty"><div class="trace-empty-inner"><strong>${state.busy ? "Capturing execution…" : "Nothing has run yet"}</strong><span>${state.busy ? "The server is tracing your Python program." : "Run your code to inspect its real execution."}</span></div></div>`;
       return;
     }
-    el.traceList.innerHTML = events.map((event, index) => {
+    const start = Math.max(0, state.selectedStep - 40);
+    const end = Math.min(events.length, start + 100);
+    el.traceList.innerHTML = `${start ? `<div class="state-empty">${start} earlier events · use the timeline to jump</div>` : ""}` + events.slice(start, end).map((event, offset) => {
+      const index = start + offset;
       const current = index === state.selectedStep;
       return `<button class="trace-row" type="button" role="option" data-step="${index}" aria-selected="${current}" ${current ? 'aria-current="step"' : ""}>
         <span class="trace-step">${String(index + 1).padStart(2, "0")}</span>
@@ -387,7 +542,7 @@
         <span class="trace-type" data-event="${escapeHtml(event.event)}">${escapeHtml(event.event || "event")}</span>
         <span class="trace-function">${escapeHtml(event.function || "<module>")}</span>
       </button>`;
-    }).join("");
+    }).join("") + (end < events.length ? `<div class="state-empty">${events.length - end} later events · use the timeline to jump</div>` : "");
     const activeRow = el.traceList.querySelector('[aria-current="step"]');
     activeRow?.scrollIntoView({ block: "nearest" });
   }
@@ -408,6 +563,7 @@
   }
 
   function stackAt(stepIndex) {
+    if (state.events[stepIndex]?.stack) return state.events[stepIndex].stack;
     const frames = [];
     for (let index = 0; index <= stepIndex; index += 1) {
       const event = state.events[index];
@@ -463,11 +619,12 @@
     }
 
     const lineNumber = Number(event.line_number) || 0;
-    const lineText = state.source.split(/\r?\n/)[lineNumber - 1] || "";
+    const lineText = (state.execution?.source_code || state.source).split(/\r?\n/)[lineNumber - 1] || "";
     const functionName = event.function || "<module>";
     const currentFrames = stackAt(state.selectedStep);
     const previous = state.selectedStep > 0 ? state.events[state.selectedStep - 1] : null;
-    const previousLocals = previous?.function === functionName ? (previous.locals || {}) : {};
+    const framePrevious = state.events.slice(0, state.selectedStep).reverse().find(item => item.frame_id === event.frame_id);
+    const previousLocals = framePrevious?.locals || {};
     const locals = event.locals && typeof event.locals === "object" ? event.locals : {};
     const changed = Object.entries(locals).filter(([name, value]) =>
       JSON.stringify(previousLocals[name]) !== JSON.stringify(value)
@@ -531,7 +688,8 @@
       el.outputCaption.textContent = "stdout";
       return;
     }
-    const error = execution.error;
+    const activeInstruction = state.teachingSteps[state.lessonIndex];
+    const error = !state.teachingSteps.length || activeInstruction?.exception || state.lessonIndex === state.teachingSteps.length - 1 ? execution.error : null;
     const output = event?.stdout ?? execution.stdout ?? "";
     const sections = [];
     if (error) {
@@ -540,10 +698,10 @@
     } else if (execution.timed_out) {
       sections.push('<div class="output-error"><div class="error-title">Execution timed out</div><div class="error-details">The program exceeded the server execution time limit.</div></div>');
     }
-    sections.push(output ? `<pre class="output-pre">${escapeHtml(output)}</pre>` : `<div class="output-empty">${error ? "No stdout was produced before the error." : "No stdout at this step."}</div>`);
+    sections.push(output ? `<pre class="output-pre">${escapeHtml(output)}</pre>` : `<div class="output-empty">${error ? "Nothing was printed before the error." : "Nothing has been printed yet."}</div>`);
     if (execution.stderr) sections.push(`<div class="stderr-output">${escapeHtml(execution.stderr)}</div>`);
     el.output.innerHTML = sections.join("");
-    el.outputCaption.textContent = event ? `stdout · step ${state.selectedStep + 1}` : "stdout";
+    el.outputCaption.textContent = event && state.lessonIndex >= 0 ? `after instruction ${state.lessonIndex + 1}` : "printed text";
   }
 
   function renderExplanation() {
@@ -564,16 +722,16 @@
 
   function renderStep() {
     const event = state.selectedStep >= 0 ? state.events[state.selectedStep] : null;
-    const total = state.events.length;
-    const count = state.selectedStep < 0 ? 0 : state.selectedStep + 1;
+    const total = state.teachingSteps.length;
+    const count = state.lessonIndex < 0 ? 0 : state.lessonIndex + 1;
     el.counter.innerHTML = `<strong>${count}</strong> / ${total}`;
-    el.previous.disabled = state.busy || state.selectedStep <= 0;
-    el.next.disabled = state.busy || state.selectedStep < 0 || state.selectedStep >= total - 1;
+    el.previous.disabled = state.busy || state.lessonIndex <= 0;
+    el.next.disabled = state.busy || state.lessonIndex < 0 || state.lessonIndex >= total - 1;
     el.play.disabled = state.busy || !total || state.playing;
     el.pause.disabled = !state.playing;
     el.reset.disabled = state.busy || !total;
     el.explain.disabled = state.busy || !event || state.explaining;
-    state.currentLine = event?.line_number ?? null;
+    state.currentLine = state.teachingSteps[state.lessonIndex]?.line ?? event?.line_number ?? null;
     if (event?.event === "exception") {
       state.errorLine = event.line_number ?? state.execution?.error?.line ?? null;
     } else {
@@ -587,6 +745,9 @@
     renderConceptFocus(event);
     renderOutput(event);
     renderExplanation();
+    window.LearningStudio?.render(state, safeText);
+    const over = $("#step-over-button");
+    if (over) over.disabled = state.busy || !event || state.lessonIndex >= total - 1;
   }
 
   function stopPlayback() {
@@ -600,6 +761,10 @@
   function selectStep(index) {
     if (index < 0 || index >= state.events.length) return;
     state.selectedStep = index;
+    if (state.teachingSteps.length) {
+      const lesson = state.teachingSteps.findIndex(step => step.snapshotIndex >= index);
+      state.lessonIndex = lesson < 0 ? state.teachingSteps.length - 1 : lesson;
+    }
     state.explanationText = "";
     state.explanationError = "";
     state.explaining = false;
@@ -607,19 +772,38 @@
     renderStep();
   }
 
+  function selectLesson(index) {
+    if (index < 0 || index >= state.teachingSteps.length) return;
+    state.lessonIndex = index;
+    state.selectedStep = state.teachingSteps[index].snapshotIndex;
+    state.explanationText = "";
+    state.explanationError = "";
+    state.explaining = false;
+    state.explainRequest += 1;
+    state.proofCell = [0, 0];
+    renderStep();
+  }
+
   function playbackTick() {
     if (!state.playing) return;
-    if (state.selectedStep >= state.events.length - 1) {
+    if (state.study?.mode === "predict") { stopPlayback(); return; }
+    if (window.GuidedLesson?.advance(state)) {
+      renderStep();
+      state.playTimer = window.setTimeout(playbackTick, 4200 - Number(el.speed.value) * 330);
+      return;
+    }
+    if (state.lessonIndex >= state.teachingSteps.length - 1) {
       stopPlayback();
       return;
     }
-    selectStep(Math.max(0, state.selectedStep + 1));
+    selectLesson(Math.max(0, state.lessonIndex + 1));
     const speed = Number(el.speed.value);
-    const delay = 1150 - speed * 92;
+    const delay = 4200 - speed * 330;
     state.playTimer = window.setTimeout(playbackTick, delay);
   }
 
   async function loadConcepts() {
+    const requestAtStart = state.conceptRequest;
     try {
       const payload = await api("/api/concepts");
       if (!payload || !Array.isArray(payload.concepts)) throw new Error("The concepts response was missing its concepts list.");
@@ -630,10 +814,10 @@
         showToast("The server returned no Python concepts.", "error");
         return;
       }
-      state.concept = state.concepts[0];
+      state.concept = state.concepts.includes(state.concept) ? state.concept : state.concepts[0];
       el.concept.value = state.concept;
       el.conceptContext.textContent = state.concept;
-      await loadExample(state.concept);
+      if (state.conceptRequest === requestAtStart && !state.busy && !state.imported && !state.importing && !getCode().trim()) await loadExample(state.concept);
     } catch (error) {
       el.concept.innerHTML = '<option value="">API unavailable</option>';
       el.conceptContext.textContent = "API unavailable";
@@ -643,13 +827,17 @@
 
   async function loadExample(concept) {
     const requestId = ++state.conceptRequest;
+    const sourceAtRequest = getCode();
     el.conceptContext.textContent = concept;
     try {
-      const payload = await api(`/api/examples?concept=${encodeURIComponent(concept)}`);
+      const payload = await api(`/api/examples?concept=${encodeURIComponent(concept)}&language=${state.language}`);
       if (typeof payload.code !== "string") throw new Error("The example response did not include Python code.");
-      if (requestId !== state.conceptRequest || concept !== el.concept.value) return;
+      if (requestId !== state.conceptRequest || concept !== el.concept.value || getCode() !== sourceAtRequest) return;
       setCode(payload.code);
+      el.filename.textContent = state.language === "matlab" ? "lesson.m" : "main.py";
+      el.filename.title = el.filename.textContent;
       clearExecution();
+      return true;
     } catch (error) {
       if (requestId !== state.conceptRequest) return;
       showToast(`Could not load the ${concept} example: ${error.message}`);
@@ -660,6 +848,8 @@
     stopPlayback();
     state.execution = null;
     state.events = [];
+    state.teachingSteps = [];
+    state.lessonIndex = -1;
     state.selectedStep = -1;
     state.currentLine = null;
     state.errorLine = null;
@@ -671,30 +861,41 @@
   }
 
   async function runCode() {
-    if (state.busy) return;
+    if (state.busy || state.importing) return;
     const code = getCode();
     state.concept = el.concept.value;
     stopPlayback();
     state.busy = true;
     state.execution = null;
     state.events = [];
+    state.teachingSteps = [];
+    state.lessonIndex = -1;
     state.selectedStep = -1;
     state.currentLine = null;
     state.errorLine = null;
     state.explanationText = "";
     state.explanationError = "";
     el.run.disabled = true;
+    $("#language-select").disabled = true;
+    $("#lesson-button").disabled = true;
+    el.importButton.disabled = true;
     el.run.innerHTML = '<span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="button-word">Running</span>';
     renderStep();
     try {
       const payload = await api("/api/execute", {
         method: "POST",
-        body: JSON.stringify({ code, concept: state.concept }),
+        body: JSON.stringify({ code, concept: state.concept, language: state.language }),
       });
       if (!payload || !Array.isArray(payload.events)) throw new Error("The execution response did not include trace events.");
+      if (getCode() !== code) {
+        showToast("The code changed while running. Click Visualize code again to walk through the edited version.", "info");
+        return;
+      }
       state.execution = payload;
       state.events = payload.events;
-      state.selectedStep = payload.events.length ? 0 : -1;
+      state.teachingSteps = window.Storyboard?.build(payload.events, payload.statements, code) || [];
+      state.lessonIndex = state.teachingSteps.length ? 0 : -1;
+      state.selectedStep = state.teachingSteps[0]?.snapshotIndex ?? (payload.events.length ? 0 : -1);
       state.errorLine = payload.error?.line ?? null;
       if (!payload.success && !payload.error && !payload.timed_out) {
         showToast("Execution did not complete successfully. Inspect the program output panel.", "error");
@@ -717,18 +918,22 @@
     } finally {
       state.busy = false;
       el.run.disabled = false;
-      el.run.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m5.2 3.5 7.1 4.1-7.1 4.1V3.5Z" fill="currentColor"/></svg><span class="button-word">Run code</span>';
+      $("#language-select").disabled = false;
+      $("#lesson-button").disabled = false;
+      el.importButton.disabled = false;
+      el.run.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m5.2 3.5 7.1 4.1-7.1 4.1V3.5Z" fill="currentColor"/></svg><span class="button-word">Visualize code</span>';
       renderStep();
     }
   }
 
   async function explainCurrentStep() {
     const event = state.events[state.selectedStep];
+    const instruction = state.teachingSteps[state.lessonIndex];
     if (!event || state.explaining) return;
     const requestId = ++state.explainRequest;
-    const code = getCode();
+    const code = state.execution?.source_code || getCode();
     const lines = code.split(/\r?\n/);
-    const lineNumber = Number(event.line_number) || 1;
+    const lineNumber = Number(instruction?.line || event.line_number) || 1;
     const previous = state.events[state.selectedStep - 1];
     state.explaining = true;
     state.explanationText = "";
@@ -739,11 +944,12 @@
       source: code,
       line_number: lineNumber,
       line_text: lines[lineNumber - 1] || "",
-      event: event.event,
-      function: event.function || "<module>",
+      event: instruction ? (instruction.kind === "enter" ? "instruction_entering_function" : "completed_instruction") : event.event,
+      function: instruction?.event.function || event.function || "<module>",
       concept: state.concept,
-      locals: event.locals || {},
-      prev_locals: previous?.locals || {},
+      language: state.language,
+      locals: instruction?.after || event.locals || {},
+      prev_locals: instruction?.before || previous?.locals || {},
     };
     if (event.exception) body.error = event.exception;
     try {
@@ -767,7 +973,79 @@
   }
 
   function bindEvents() {
+    $(".learning-panel").addEventListener("click", event => {
+      const action = event.target.closest("[data-study-action]");
+      const history = event.target.closest("[data-history-index]");
+      const node = event.target.closest("[data-node-id]");
+      if (action) { stopPlayback(); window.GuidedLesson?.handle(action, state); renderStep(); }
+      else if (history) { stopPlayback(); selectLesson(Number(history.dataset.historyIndex)); }
+      else if (node && state.study) { state.study.node = node.dataset.nodeId; window.LearningStudio?.render(state, safeText); }
+    });
+    $(".learning-panel").addEventListener("input", event => {
+      if (event.target.id === "prediction-answer" && state.study) state.study.answer = event.target.value;
+      if (event.target.id === "history-variable") { state.historyName = event.target.value; window.LearningStudio?.render(state, safeText); }
+    });
+    $(".learning-panel").addEventListener("keydown", event => {
+      if (event.key === "Enter" && event.target.id === "prediction-answer") {
+        event.preventDefault(); stopPlayback(); window.GuidedLesson?.handle({dataset:{studyAction:"check"}}, state); renderStep();
+      }
+      if (["Enter", " "].includes(event.key) && event.target.matches("[data-node-id]")) { event.preventDefault(); event.target.dispatchEvent(new MouseEvent("click", {bubbles:true})); }
+    });
+    $(".lesson-launcher").addEventListener("click", async event => {
+      const button = event.target.closest("[data-lesson]");
+      if (!button || state.busy || state.importing) return;
+      state.language = button.dataset.lesson === "matlab" ? "matlab" : "python";
+      $("#language-select").value = state.language;
+      $("#language-note").hidden = state.language !== "matlab";
+      $("#editor-mode").textContent = state.language === "matlab" ? "MATLAB learning mode" : "Python";
+      if (state.editorReady) window.monaco?.editor?.setModelLanguage(state.editor.getModel(), state.language === "matlab" ? "plaintext" : "python");
+      state.concept = button.dataset.lesson === "matlab" ? "Variables & Assignment" : button.dataset.lesson;
+      el.concept.value = state.concept;
+      state.visualMode = "picture";
+      state.structurePinned = false;
+      if (await loadExample(state.concept)) await runCode();
+    });
+    document.querySelectorAll('[data-lesson]').forEach(button => { button.disabled = false; });
+    $(".picture-tabs").addEventListener("click", event => {
+      const button = event.target.closest("[data-visual-mode]");
+      if (button) { state.visualMode = button.dataset.visualMode; window.LearningStudio?.render(state, safeText); }
+    });
+    $("#instruction-figure").addEventListener("click", event => {
+      const cell = event.target.closest("[data-result-cell]");
+      if (cell) { state.proofCell = cell.dataset.resultCell.split(",").map(Number); window.LearningStudio?.render(state, safeText); }
+    });
+    $("#lesson-button").addEventListener("click", () => { if (!state.busy) loadExample(state.concept); });
+    $("#language-select").addEventListener("change", () => {
+      stopPlayback();
+      state.conceptRequest += 1;
+      state.language = $("#language-select").value;
+      $("#language-note").hidden = state.language !== "matlab";
+      $("#editor-mode").textContent = state.language === "matlab" ? "MATLAB learning mode" : "Python";
+      if (state.editorReady) window.monaco?.editor?.setModelLanguage(state.editor.getModel(), state.language === "matlab" ? "plaintext" : "python");
+      clearExecution();
+      showToast("Language changed. Load a lesson or import your source.", "info");
+    });
+    $("#timeline").addEventListener("input", () => { stopPlayback(); selectLesson(Number($("#timeline").value)); });
+    $("#experience-select").addEventListener("change", () => {
+      document.body.dataset.detail = $("#experience-select").value;
+      $("#technical-details").open = $("#experience-select").value === "expert";
+    });
+    for (const selector of ["#experience-select", "#structure-variable", "#directed-toggle", "#zoom-range"]) {
+      $(selector).addEventListener("input", () => { if (selector === "#structure-variable") state.structurePinned = true; window.LearningStudio?.render(state, safeText); });
+    }
+    $("#step-over-button").addEventListener("click", () => {
+      stopPlayback();
+      const event = state.events[state.selectedStep];
+      if (!event) return;
+      const teaching = state.teachingSteps[state.lessonIndex];
+      const depth = teaching?.kind === "enter" ? teaching.event.call_depth : event.call_depth;
+      let next = state.selectedStep + 1;
+      while (next < state.events.length - 1 && state.events[next].call_depth > depth) next++;
+      selectStep(next);
+    });
     el.concept.addEventListener("change", () => {
+      // A concept changes the view; it must never replace the user's source.
+      state.conceptRequest += 1;
       state.concept = el.concept.value;
       if (state.concept) {
         el.conceptContext.textContent = state.concept;
@@ -779,11 +1057,13 @@
       }
     });
     el.run.addEventListener("click", runCode);
-    el.previous.addEventListener("click", () => selectStep(state.selectedStep - 1));
-    el.next.addEventListener("click", () => selectStep(state.selectedStep + 1));
+    el.downloadButton.addEventListener("click", downloadCode);
+    el.previous.addEventListener("click", () => { stopPlayback(); selectLesson(state.lessonIndex - 1); });
+    el.next.addEventListener("click", () => { stopPlayback(); if (window.GuidedLesson?.advance(state)) renderStep(); else selectLesson(state.lessonIndex + 1); });
     el.play.addEventListener("click", () => {
       if (!state.events.length) return;
-      if (state.selectedStep >= state.events.length - 1) selectStep(0);
+      if (state.study?.mode === "predict") { showToast("Prediction mode pauses for your answer. Use Check my prediction or Reveal the result.", "info"); return; }
+      if (state.lessonIndex >= state.teachingSteps.length - 1 && (state.study?.mode === "all" || state.study?.phase === 2)) selectLesson(0);
       state.playing = true;
       el.play.disabled = true;
       el.pause.disabled = false;
@@ -792,7 +1072,8 @@
     el.pause.addEventListener("click", stopPlayback);
     el.reset.addEventListener("click", () => {
       stopPlayback();
-      if (state.events.length) selectStep(0);
+      if (state.study) Object.assign(state.study, {phase:0, revealed:false, answer:"", feedback:null, node:null});
+      if (state.teachingSteps.length) selectLesson(0);
     });
     el.explain.addEventListener("click", explainCurrentStep);
     el.traceList.addEventListener("click", (event) => {
@@ -824,6 +1105,7 @@
 
   installFallbackEditing();
   bindEvents();
+  bindFileImport();
   bootMonaco();
   renderStep();
   checkHealth();

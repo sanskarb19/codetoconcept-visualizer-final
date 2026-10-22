@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -22,9 +23,9 @@ from execution.executor import execute_code  # noqa: E402
 from visualization.registry import CONCEPTS  # noqa: E402
 
 app = FastAPI(
-    title="Python Code Visualizer",
-    description="Run Python in a subprocess and inspect its captured execution trace.",
-    version="1.0.0",
+    title="Code to Concept",
+    description="Learn execution through instructions, observed outcomes and visual figures.",
+    version="2.0.0",
 )
 gemini = GeminiExplainer()
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
@@ -32,11 +33,13 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 class ExecuteRequest(BaseModel):
     code: str = Field(max_length=100_000)
+    language: Literal["python", "matlab"] = "python"
     concept: str = Field(default="Variables & Assignment", max_length=80)
 
 
 class ExplainRequest(BaseModel):
     source: str = Field(max_length=100_000)
+    language: Literal["python", "matlab"] = "python"
     line_number: int | None = None
     line_text: str = Field(default="", max_length=2_000)
     event: str = Field(default="line", max_length=40)
@@ -65,9 +68,12 @@ async def concepts():
 
 
 @app.get("/api/examples")
-async def example(concept: str = "Variables & Assignment"):
+async def example(concept: str = "Variables & Assignment", language: str = "python"):
     if concept not in CONCEPTS:
         raise HTTPException(status_code=422, detail="Choose a concept from the list.")
+    if language == "matlab":
+        from execution.matlab import EXAMPLE
+        return {"code": EXAMPLE}
     return {"code": get_example(concept)}
 
 
@@ -78,7 +84,7 @@ async def run_program(request: ExecuteRequest):
 
     # Run the blocking subprocess call off the event loop so the web UI remains
     # responsive while the trace is being collected.
-    result = await run_in_threadpool(execute_code, request.code, 5.0)
+    result = await run_in_threadpool(execute_code, request.code, 5.0, request.language)
     result.setdefault("source_code", request.code)
     result.setdefault("events", [])
     result.setdefault("stdout", "")
@@ -86,6 +92,8 @@ async def run_program(request: ExecuteRequest):
     result.setdefault("timed_out", False)
     result.setdefault("error", None)
     result["success"] = result["error"] is None
+    from execution.lesson_metadata import describe_source
+    result["statements"] = describe_source(request.code, request.language)
     return result
 
 

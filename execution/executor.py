@@ -9,7 +9,7 @@ from pathlib import Path
 RUNNER = Path(__file__).resolve().parent / "tracer_runner.py"
 
 
-def execute_code(source: str, timeout: float = 5.0) -> dict:
+def execute_code(source: str, timeout: float = 5.0, language: str = "python") -> dict:
     """Execute user code in a subprocess and return a trace dict.
 
     SECURITY: A subprocess alone is NOT a full sandbox. Only run trusted code.
@@ -29,7 +29,7 @@ def execute_code(source: str, timeout: float = 5.0) -> dict:
 
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-u", str(RUNNER), src_path, out_path],
+                [sys.executable, "-u", str(RUNNER), src_path, out_path, language],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

@@ -41,6 +41,10 @@ def serialize(value, depth=0, seen=None):
         return {"__type__": "cycle", "value": "<recursive>"}
     seen = seen | {oid}
 
+    if type(value).__module__ == "execution.matlab" and type(value).__name__ == "Matrix":
+        return {"__type__": "matrix", "value": value.rows,
+                "shape": [len(value.rows), len(value.rows[0]) if value.rows else 0]}
+
     if isinstance(value, list):
         return {"__type__": "list",
                 "value": [serialize(v, depth + 1, seen) for v in value[:MAX_ITEMS]]}
@@ -59,6 +63,12 @@ def serialize(value, depth=0, seen=None):
             key = k if isinstance(k, str) else repr(k)
             out[key[:60]] = serialize(v, depth + 1, seen)
         return {"__type__": "dict", "value": out}
+
+    if hasattr(value, "__dict__") and not callable(value):
+        attrs = {k: serialize(v, depth + 1, seen)
+                 for k, v in list(vars(value).items())[:MAX_ITEMS] if not k.startswith("__")}
+        return {"__type__": "instance", "class": type(value).__name__,
+                "id": str(oid), "value": attrs}
 
     try:
         r = repr(value)
